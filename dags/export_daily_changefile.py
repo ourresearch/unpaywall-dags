@@ -1,5 +1,4 @@
 import gzip
-import tempfile
 
 from airflow.decorators import task, dag
 from airflow.providers.amazon.aws.hooks.s3 import S3Hook
@@ -84,15 +83,15 @@ def export_daily_changefile():
         pg_hook.run(update_sql)
 
     @task()
-    def run_heroku_python_script():
-        heroku_conn = heroku3.from_key('YOUR_HEROKU_API_KEY')
+    def update_changefile_dicts():
+        heroku_conn = heroku3.from_key('HEROKU_API_KEY')
         app = heroku_conn.apps()['oadoi']
         app.run_command('python cache_changefile_dicts.py', attach=False)
 
     extract_task = extract_changes()
     export_task = export_gzip_and_upload_to_s3()
     update_dates_task = update_last_exported_dates()
-    heroku_task = run_heroku_python_script()
+    update_dicts = update_changefile_dicts()
 
 
 export_daily_changefile_dag = export_daily_changefile()
