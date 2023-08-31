@@ -16,7 +16,7 @@ DAILY_EXPORT_HISTORY = "daily_export_dates"
 def export_daily_changefile():
 
     @task()
-    def extract_possible_changes(execution_date):
+    def extract_changes(execution_date):
         start_date = execution_date - days_ago(2)
         end_date = execution_date
 
@@ -41,26 +41,29 @@ def export_daily_changefile():
             pg_hook.run(sql)
 
     @task
-    def export_gzip_and_upload_to_s3():
+    def export_gzip_and_upload_to_s3(execution_date):
         pg_hook = PostgresHook(postgres_conn_id='your_postgres_conn_id')
         s3_hook = S3Hook(aws_conn_id='your_aws_conn_id')
 
-        # Create a temporary file
-        with tempfile.NamedTemporaryFile(delete=True) as temp_file:
-            # Gzip and write data to the temp file
-            with gzip.open(temp_file.name, 'wb') as gz:
-                conn = pg_hook.get_conn()
-                cursor = conn.cursor()
-                cursor.copy_expert("COPY your_sql_query TO STDOUT WITH CSV", gz)
-                cursor.close()
+        # Generate the unique filename using execution_date
+        filename = f"changed_dois_with_versions_{execution_date.strftime('%Y-%m-%dT%H%M%S')}.jsonl.gz"
+        temp_filepath = f"/tmp/{filename}"
 
-            # Upload gzipped data to S3
-            s3_hook.load_file(
-                filename=temp_file.name,
-                key='your-object-key',
-                bucket_name='your-bucket-name',
-                replace=True
-            )
+        # Gzip and write data to the temp file
+        with gzip.open(temp_filepath, 'wb') as gz:
+            conn = pg_hook.get_conn()
+            cursor = conn.cursor()
+            sql = f"COPY (SELECT response_jsonb FROM {JSON_STAGING_TABLE} WHERE response_jsonb IS NOT NULL) TO STDOUT"
+            cursor.copy_expert(sql, gz)
+            cursor.close()
+
+        # Upload gzipped data to S3
+        s3_hook.load_file(
+            filename=temp_filepath,
+            key=filename,
+            bucket_name='unpaywall-daily-data-feed',
+            replace=True
+        )
 
     @task()
     def update_last_exported_dates():
@@ -86,7 +89,7 @@ def export_daily_changefile():
         app = heroku_conn.apps()['oadoi']
         app.run_command('python cache_changefile_dicts.py', attach=False)
 
-    extract_task = extract_possible_changes()
+    extract_task = extract_changes()
     export_task = export_gzip_and_upload_to_s3()
     update_dates_task = update_last_exported_dates()
     heroku_task = run_heroku_python_script()
