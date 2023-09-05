@@ -46,7 +46,7 @@ def extract_changes(execution_date, prev_execution_date):
 def export_gzip_and_upload_to_s3(execution_date):
     execution_date_dt = pendulum.parse(execution_date)
     pg_hook = PostgresHook(postgres_conn_id="UNPAYWALL_POSTGRES")
-    s3_hook = S3Hook()
+    s3_hook = S3Hook(aws_conn_id="UNPAYWALL_S3")
 
     logging.info(f"Exporting daily snapshot changes for {execution_date_dt}")
 
