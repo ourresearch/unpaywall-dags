@@ -4,22 +4,20 @@ import logging
 from airflow.decorators import task, dag
 from airflow.providers.amazon.aws.hooks.s3 import S3Hook
 from airflow.providers.postgres.hooks.postgres import PostgresHook
-from airflow.utils.dates import days_ago
 import heroku3
 import pendulum
 
 JSON_STAGING_TABLE = "daily_export_staging_test"
-DAILY_EXPORT_HISTORY = "daily_export_dates"
+DAILY_EXPORT_HISTORY = "daily_export_dates_test"
 
 
 @dag(schedule_interval="@daily", start_date=pendulum.datetime(2023, 9, 4), catchup=False)
 def export_daily_changefile():
-
     @task()
-    def extract_changes(execution_date):
-        execution_date_dt = pendulum.parse(execution_date)
-        start_date = execution_date_dt.subtract(days=2).strftime('%Y-%m-%d')
-        end_date = execution_date_dt.strftime('%Y-%m-%d')
+    def extract_changes(execution_date, prev_execution_date):
+        start_date = prev_execution_date
+        end_date = execution_date
+
         logging.info(f"Extracting daily snapshot changes from {start_date} to {end_date}")
 
         pg_hook = PostgresHook(postgres_conn_id="UNPAYWALL_POSTGRES")
@@ -50,13 +48,11 @@ def export_daily_changefile():
         pg_hook = PostgresHook(postgres_conn_id="UNPAYWALL_POSTGRES")
         s3_hook = S3Hook()
 
-        logging.info(f"Exporting daily snapshot changes for {execution_date}")
+        logging.info(f"Exporting daily snapshot changes for {execution_date_dt}")
 
-        # Generate the unique filename using execution_date
         filename = f"changed_dois_with_versions_{execution_date_dt.strftime('%Y-%m-%dT%H%M%S')}.jsonl.gz"
         temp_filepath = f"/tmp/{filename}"
 
-        # Gzip and write data to the temp file
         with gzip.open(temp_filepath, 'wb') as gz:
             logging.info(f"Writing to {temp_filepath}")
             conn = pg_hook.get_conn()
@@ -65,7 +61,6 @@ def export_daily_changefile():
             cursor.copy_expert(sql, gz)
             cursor.close()
 
-        # Upload gzipped data to S3
         logging.info(f"Uploading {temp_filepath} to S3")
         s3_hook.load_file(
             filename=temp_filepath,
@@ -73,24 +68,21 @@ def export_daily_changefile():
             bucket_name='unpaywall-daily-data-feed-test',
             replace=True
         )
-    #
-    # @task()
-    # def update_last_exported_dates():
-    #     # Get Postgres Hook
-    #     pg_hook = PostgresHook(postgres_conn_id='your_postgres_conn_id')
-    #
-    #     # SQL to update last-exported dates and truncate the staging table
-    #     update_sql = f"""
-    #         INSERT INTO {DAILY_EXPORT_HISTORY} (id, last_exported_update) (
-    #             SELECT id, last_changed_date FROM {JSON_STAGING_TABLE}
-    #         )
-    #         ON CONFLICT (id) DO UPDATE SET last_exported_update = excluded.last_exported_update;
-    #
-    #         TRUNCATE {JSON_STAGING_TABLE};
-    #         """
-    #
-    #     # Run SQL
-    #     pg_hook.run(update_sql)
+
+    @task()
+    def update_last_exported_dates():
+        pg_hook = PostgresHook(postgres_conn_id="UNPAYWALL_POSTGRES")
+
+        update_sql = f"""
+            INSERT INTO {DAILY_EXPORT_HISTORY} (id, last_exported_update) (
+                SELECT id, last_changed_date FROM {JSON_STAGING_TABLE}
+            )
+            ON CONFLICT (id) DO UPDATE SET last_exported_update = excluded.last_exported_update;
+
+            TRUNCATE {JSON_STAGING_TABLE};
+            """
+
+        pg_hook.run(update_sql)
     #
     # @task()
     # def update_changefile_dicts():
@@ -98,12 +90,15 @@ def export_daily_changefile():
     #     app = heroku_conn.apps()['oadoi']
     #     app.run_command('python cache_changefile_dicts.py', attach=False)
 
-    extract_task = extract_changes(execution_date="{{ ds }}")
-    export_task = export_gzip_and_upload_to_s3(execution_date="{{ ds }}")
-    # update_dates_task = update_last_exported_dates()
+    extract_task = extract_changes(
+        execution_date="{{ execution_date }}",
+        prev_execution_date="{{ prev_execution_date }}"
+    )
+    export_task = export_gzip_and_upload_to_s3(execution_date="{{ execution_date }}")
+    update_dates_task = update_last_exported_dates()
     # update_dicts_task = update_changefile_dicts()
 
-    extract_task >> export_task
+    extract_task >> export_task >> update_dates_task
 
 
 export_daily_changefile_dag = export_daily_changefile()
