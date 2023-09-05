@@ -3,6 +3,7 @@ import logging
 import os
 
 from airflow.decorators import task, dag
+from airflow.models import Variable
 from airflow.providers.amazon.aws.hooks.s3 import S3Hook
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 import heroku3
@@ -53,7 +54,7 @@ def export_gzip_and_upload_to_s3(execution_date):
     filename = f"changed_dois_with_versions_{execution_date_dt.strftime('%Y-%m-%dT%H%M%S')}.jsonl.gz"
     temp_filepath = f"/tmp/{filename}"
 
-    with gzip.open(temp_filepath, 'wb') as gz:
+    with gzip.open(temp_filepath, "wb") as gz:
         logging.info(f"Writing to {temp_filepath}")
         conn = pg_hook.get_conn()
         cursor = conn.cursor()
@@ -62,11 +63,12 @@ def export_gzip_and_upload_to_s3(execution_date):
         cursor.close()
 
     logging.info(f"Uploading {temp_filepath} to S3")
+
     s3_hook.load_file(
         filename=temp_filepath,
         key=filename,
-        bucket_name='unpaywall-daily-data-feed-test',
-        replace=True
+        bucket_name="unpaywall-daily-data-feed-test",
+        replace=True,
     )
 
     os.remove(temp_filepath)
@@ -86,24 +88,29 @@ def update_last_exported_dates():
         """
 
     pg_hook.run(update_sql)
-#
-# @task()
-# def update_changefile_dicts():
-#     heroku_conn = heroku3.from_key('HEROKU_API_KEY')
-#     app = heroku_conn.apps()['oadoi']
-#     app.run_command('python cache_changefile_dicts.py', attach=False)
 
 
-@dag(schedule_interval="@daily", start_date=pendulum.datetime(2023, 9, 4), catchup=False)
+@task()
+def update_changefile_dicts():
+    heroku_api_key = Variable.get("HEROKU_API_KEY")
+    heroku_conn = heroku3.from_key(heroku_api_key)
+    app = heroku_conn.apps()["oadoi"]
+    app.run_command("python cache_changefile_dicts.py", attach=False)
+
+
+@dag(
+    schedule_interval="@daily", start_date=pendulum.datetime(2023, 9, 4), catchup=False
+)
 def export_daily_changefile():
     extract_task = extract_changes(
         execution_date="{{ execution_date }}",
-        prev_execution_date="{{ prev_execution_date }}"
+        prev_execution_date="{{ prev_execution_date }}",
     )
     export_task = export_gzip_and_upload_to_s3(execution_date="{{ execution_date }}")
     update_dates_task = update_last_exported_dates()
     # update_dicts_task = update_changefile_dicts()
 
     extract_task >> export_task >> update_dates_task
+
 
 export_daily_changefile_dag = export_daily_changefile()
